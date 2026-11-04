@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<style>
+body{margin:0;padding:0;touch-action:pan-x pan-y;}
+#map{width:100%;height:100vh;}
+.leaflet-control-zoom{border:none!important;box-shadow:0 4px 12px rgba(0,0,0,0.25)!important;border-radius:14px!important;overflow:hidden;margin-bottom:15px!important;margin-right:15px!important;}
+.leaflet-control-zoom a{width:48px!important;height:48px!important;line-height:48px!important;font-size:24px!important;background-color:#ffffff!important;color:#333333!important;text-decoration:none;display:block;text-align:center;}
+.leaflet-control-zoom a:hover{background-color:#f2f2f2!important;}
+.leaflet-control-zoom-in{border-bottom:1px solid #eaeaea!important;}
+</style>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+<div id="map"></div>
+<script>
+var globalJalanMap = {};
+var rumahData = [];
+var roadGraph = null; // dibangun sekali setelah data jalan selesai dimuat
+
+// Jarak (meter) maksimum antar titik DARI JALAN BERBEDA agar dianggap
+// sebagai persimpangan nyata dan disambungkan di graf. Perkecil jika ada
+// jalan paralel yang berdekatan tersambung secara keliru; perbesar jika
+// persimpangan asli tidak tersambung.
+var INTERSECTION_THRESHOLD_M = 6;
+
+function loadData() {
+  fetch("https://script.google.com/macros/s/AKfycbxFmjL72O2Tal9uvtvRY4g56AM0dBvsiob-Ztklq9XjMEm4ZOG-_QdZc4Zynb6qQh0/exec?action=getData")
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      rumahData = data.rumah || [];
+      globalJalanMap = data.jalan || {};
+      roadGraph = buildGraph(globalJalanMap);
+    })
+    .catch(function(err) { console.error("Gagal memuat data:", err); });
+}
+loadData();
+
+var bounds=[[-5.3442640,105.2391183],[-5.3394904,105.2434137]];
+var map=L.map('map',{zoomControl:false,attributionControl:false,dragging:true,touchZoom:true,maxBounds:bounds,maxBoundsViscosity:1.0});
+L.imageOverlay('https://raw.githubusercontent.com/ryansiwi/siteplan-rajabasa/main/Site_Plan.png',bounds).addTo(map);
+map.fitBounds(bounds);
+var u=null, t=null, r=null;
+
+var NavZoomControl = L.Control.extend({
+  options: { position: 'bottomright' },
+  onAdd: function (map) {
+    var container = L.DomUtil.create('div', 'leaflet-control-zoom leaflet-bar');
+    container.style.marginBottom = '15px';
+    container.style.marginRight = '15px';
+
+    container.innerHTML =
+      '<a href="#" title="Fokus ke Rumah Tujuan" id="btnTarget" style="border-bottom:1px solid #eaeaea;">🏠</a>' +
+      '<a href="#" title="Fokus ke Lokasi Saya" id="btnUser" style="border-bottom:1px solid #eaeaea;">📍</a>' +
+      '<a href="#" title="Perbesar" id="btnZoomIn" style="border-bottom:1px solid #eaeaea;">+</a>' +
+      '<a href="#" title="Perkecil" id="btnZoomOut">−</a>';
+
+    L.DomEvent.disableClickPropagation(container);
+
+    container.querySelector('#btnTarget').onclick = function(e) {
+      e.preventDefault();
+      if (t) {
+        map.setView(t.getLatLng(), 18, { animate: true });
+        t.openPopup();
+      } else {
+        alert("Rumah tujuan belum dipilih!");
+      }
+    };
+
+    container.querySelector('#btnUser').onclick = function(e) {
+      e.preventDefault();
+      if (u) {
+        map.setView(u.getLatLng(), 18, { animate: true });
+        u.openPopup();
+      } else {
+        alert("Lokasi Anda belum terdeteksi!");
+      }
+    };
+
+    container.querySelector('#btnZoomIn').onclick = function(e) {
+      e.preventDefault();
+      map.zoomIn();
+    };
+
+    container.querySelector('#btnZoomOut').onclick = function(e) {
+      e.preventDefault();
+      map.zoomOut();
+    };
+
+    return container;
+  }
+});
+map.addControl(new NavZoomControl());
+
+var offsetLat=-0.0001872;
+var offsetLon=-0.0004500;
+
+// Jarak dalam meter antar dua koordinat (equirectangular approximation,
+// cukup akurat untuk area sekecil kompleks perumahan).
+function distMeters(lat1, lon1, lat2, lon2) {
+  var R = 6371000;
+  var toRad = Math.PI / 180;
+  var x = (lon2 - lon1) * toRad * Math.cos(((lat1 + lat2) / 2) * toRad);
+  var y = (lat2 - lat1) * toRad;
+  return Math.sqrt(x * x + y * y) * R;
+}
+
+// Membangun graf jalan: setiap titik berurutan di satu jalan jadi edge,
+// dan titik-titik dari jalan BERBEDA yang jaraknya sangat dekat
+// (persimpangan nyata) juga disambungkan. Pencarian persimpangan memakai
+// grid spasial sederhana supaya tidak harus membandingkan semua pasang titik.
+function buildGraph(jalanMap) {
+  var nodes = {};
+  var adj = {};
+  var ids = [];
+
+  for (var road in jalanMap) {
+    var pts = jalanMap[road];
+    if (!pts || !pts.length) continue;
+    for (var i = 0; i < pts.length; i++) {
+      var id = road + '#' + i;
+      nodes[id] = { lat: pts[i].lat, lon: pts[i].lon, road: road };
+      adj[id] = [];
+      ids.push(id);
+      if (i > 0) {
+        var prevId = road + '#' + (i - 1);
+        var w = distMeters(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+        adj[id].push({ to: prevId, w: w });
+        adj[prevId].push({ to: id, w: w });
+      }
+    }
+  }
+
+  if (ids.length === 0) return { nodes: nodes, adj: adj, ids: ids };
+
+  var latSum = 0;
+  for (var k = 0; k < ids.length; k++) latSum += nodes[ids[k]].lat;
+  var latRef = latSum / ids.length;
+
+  var mPerDegLat = 111320;
+  var mPerDegLon = 111320 * Math.cos(latRef * Math.PI / 180);
+  var cellDegLat = INTERSECTION_THRESHOLD_M / mPerDegLat;
+  var cellDegLon = INTERSECTION_THRESHOLD_M / mPerDegLon;
+
+  function cellKey(lat, lon) {
+    return Math.floor(lon / cellDegLon) + '_' + Math.floor(lat / cellDegLat);
+  }
+
+  var grid = {};
+  for (var k = 0; k < ids.length; k++) {
+    var id = ids[k], p = nodes[id];
+    var key = cellKey(p.lat, p.lon);
+    if (!grid[key]) grid[key] = [];
+    grid[key].push(id);
+  }
+
+  var connected = {};
+  for (var k = 0; k < ids.length; k++) {
+    var id = ids[k], p = nodes[id];
+    var gx = Math.floor(p.lon / cellDegLon);
+    var gy = Math.floor(p.lat / cellDegLat);
+    for (var dx = -1; dx <= 1; dx++) {
+      for (var dy = -1; dy <= 1; dy++) {
+        var bucket = grid[(gx + dx) + '_' + (gy + dy)];
+        if (!bucket) continue;
+        for (var bi = 0; bi < bucket.length; bi++) {
+          var otherId = bucket[bi];
+          if (otherId === id) continue;
+          var q = nodes[otherId];
+          if (q.road === p.road) continue;
+          var pairKey = id < otherId ? id + '|' + otherId : otherId + '|' + id;
+          if (connected[pairKey]) continue;
+          var d = distMeters(p.lat, p.lon, q.lat, q.lon);
+          if (d <= INTERSECTION_THRESHOLD_M) {
+            adj[id].push({ to: otherId, w: d });
+            adj[otherId].push({ to: id, w: d });
+            connected[pairKey] = true;
+          }
+        }
+      }
+    }
+  }
+
+  return { nodes: nodes, adj: adj, ids: ids };
+}
+
+// Cari node graf terdekat dari (lat, lon). Jika roadFilter diisi dan
+// jalan itu ada di graf, pencarian dibatasi ke jalan tersebut saja -
+// jauh lebih akurat daripada menebak lewat seluruh jalan saat beberapa
+// jalan berjalan sejajar berdekatan.
+function nearestNode(graph, lat, lon, roadFilter) {
+  var bestId = null, bestD = Infinity;
+  var ids = graph.ids;
+  var restricted = !!roadFilter;
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    if (restricted && graph.nodes[id].road !== roadFilter) continue;
+    var p = graph.nodes[id];
+    var d = distMeters(lat, lon, p.lat, p.lon);
+    if (d < bestD) { bestD = d; bestId = id; }
+  }
+  if (bestId === null && restricted) {
+    return nearestNode(graph, lat, lon, null);
+  }
+  return bestId;
+}
+
+// Dijkstra dengan binary heap sederhana - mencari rute terpendek
+// menyusuri graf jalan, bisa melewati berapa pun jalan yang tersambung
+// (tidak dibatasi hanya 2 jalan seperti sebelumnya).
+function dijkstra(graph, startId, endId) {
+  if (!startId || !endId) return null;
+  if (startId === endId) return [startId];
+
+  var dist = {}, prev = {}, visited = {};
+  dist[startId] = 0;
+  var heap = [[0, startId]];
+
+  function heapPush(item) {
+    heap.push(item);
+    var i = heap.length - 1;
+    while (i > 0) {
+      var parent = (i - 1) >> 1;
+      if (heap[parent][0] <= heap[i][0]) break;
+      var tmp = heap[parent]; heap[parent] = heap[i]; heap[i] = tmp;
+      i = parent;
+    }
+  }
+  function heapPop() {
+    var top = heap[0];
+    var last = heap.pop();
+    if (heap.length) {
+      heap[0] = last;
+      var i = 0;
+      while (true) {
+        var l = i * 2 + 1, rt = i * 2 + 2, smallest = i;
+        if (l < heap.length && heap[l][0] < heap[smallest][0]) smallest = l;
+        if (rt < heap.length && heap[rt][0] < heap[smallest][0]) smallest = rt;
+        if (smallest === i) break;
+        var tmp = heap[smallest]; heap[smallest] = heap[i]; heap[i] = tmp;
+        i = smallest;
+      }
+    }
+    return top;
+  }
+
+  while (heap.length) {
+    var cur = heapPop();
+    var d = cur[0], id = cur[1];
+    if (visited[id]) continue;
+    visited[id] = true;
+    if (id === endId) break;
+    var edges = graph.adj[id] || [];
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      var nd = d + e.w;
+      if (dist[e.to] === undefined || nd < dist[e.to]) {
+        dist[e.to] = nd;
+        prev[e.to] = id;
+        heapPush([nd, e.to]);
+      }
+    }
+  }
+
+  if (dist[endId] === undefined) return null;
+
+  var path = [];
+  var cur2 = endId;
+  while (cur2 !== undefined) {
+    path.push(cur2);
+    if (cur2 === startId) break;
+    cur2 = prev[cur2];
+  }
+  path.reverse();
+  return path;
+}
+
+// drawRoute(a, b, c, d, w)
+//   a, b = lat, lon posisi pengguna (sebelum offset)
+//   c, d = lat, lon rumah tujuan
+//   w    = (opsional) nama jalan rumah tujuan, mis. rumah.nama_jalan dari
+//          data yang sudah diambil - dipakai supaya titik tujuan langsung
+//          dicocokkan ke jalan yang benar, bukan ditebak lewat jarak saja.
+function drawRoute(a, b, c, d, w) {
+  try {
+    var latA = parseFloat(a) + offsetLat;
+    var lonA = parseFloat(b) + offsetLon;
+    var latB = parseFloat(c);
+    var lonB = parseFloat(d);
+    var destRoad = (w || "").toString().trim();
+
+    if (u) map.removeLayer(u);
+    if (t) map.removeLayer(t);
+    if (r) map.removeLayer(r);
+
+    u = L.marker([latA, lonA]).addTo(map).bindPopup('Posisi Anda');
+    var redIcon = new L.Icon({
+      iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+      iconSize: [25, 41],
+      iconAnchor: [12, 41],
+      popupAnchor: [1, -34]
+    });
+    t = L.marker([latB, lonB], { icon: redIcon }).addTo(map).bindPopup('Rumah Tujuan').openPopup();
+
+    if (!roadGraph || !roadGraph.ids || !roadGraph.ids.length) {
+      // Data jalan belum selesai dimuat, coba lagi sebentar lagi.
+      setTimeout(function () { drawRoute(a, b, c, d, w); }, 600);
+      return;
+    }
+
+    var startId = nearestNode(roadGraph, latA, lonA, null);
+    var endId = nearestNode(roadGraph, latB, lonB, (destRoad && globalJalanMap[destRoad]) ? destRoad : null);
+
+    var path = dijkstra(roadGraph, startId, endId);
+
+    var sub;
+    if (path) {
+      sub = [[latA, lonA]];
+      for (var i = 0; i < path.length; i++) {
+        var p = roadGraph.nodes[path[i]];
+        sub.push([p.lat, p.lon]);
+      }
+      sub.push([latB, lonB]);
+    } else {
+      // Graf tidak tersambung antara titik awal dan tujuan - tampilkan
+      // garis lurus sebagai fallback agar aplikasi tidak gagal total.
+      sub = [[latA, lonA], [latB, lonB]];
+    }
+
+    r = L.polyline(sub, { color: '#007BFF', weight: 5, opacity: 0.8 }).addTo(map);
+
+    map.invalidateSize();
+    map.setView([latB, lonB], 18, { animate: true });
+  } catch (err) {
+    alert("Error drawRoute: " + err.message);
+  }
+}
+</script>
+</body>
+</html>
