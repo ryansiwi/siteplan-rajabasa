@@ -40,7 +40,7 @@ var GPS_WEAK_M = 30;             // akurasi GPS lebih buruk dari ini -> peringat
 
 // Set true SEMENTARA saat uji coba di lapangan: setiap drawRoute() muncul
 // toast berisi jarak snap sebenarnya. Kembalikan ke false setelah selesai.
-var DEBUG_SNAP_DISTANCE = true;
+var DEBUG_SNAP_DISTANCE = false;
 
 // Notifikasi sendiri (pengganti alert, tanpa judul "Halaman pada ... menyatakan").
 function showToast(msg, ms) {
@@ -103,7 +103,7 @@ var NavZoomControl = L.Control.extend({
         map.setView(t.getLatLng(), 18, { animate: true });
         t.openPopup();
       } else {
-        showToast("Rumah tujuan belum dipilih!");
+        showToast("⚠️ Rumah tujuan belum dipilih!");
       }
     };
 
@@ -113,7 +113,7 @@ var NavZoomControl = L.Control.extend({
         map.setView(u.getLatLng(), 18, { animate: true });
         u.openPopup();
       } else {
-        showToast("Lokasi Anda belum terdeteksi!");
+        showToast("⚠️ Lokasi Anda belum terdeteksi!");
       }
     };
 
@@ -432,7 +432,7 @@ function drawRoute(a, b, c, d, w, acc) {
     }
 
     if (!siteBounds.contains([latA, lonA])) {
-      showToast("Posisi Anda di luar area perumahan.\nHanya rumah tujuan yang ditandai.");
+      showToast("⚠️ Rute tidak terbentuk, Posisi GPS  Dan Anda berada di luar area maps perumahan!");
       focusDest();
       return;
     }
@@ -448,7 +448,7 @@ function drawRoute(a, b, c, d, w, acc) {
     var start = pickStart(roadGraph, latA, lonA, endId, accM);
 
     if (!start || start.nearestD > MAX_SNAP_DISTANCE_M) {
-      showToast("Posisi Anda terlalu jauh dari jalan perumahan.\nDekati jalan lalu coba lagi.");
+      showToast("⚠️ Posisi Anda terlalu jauh dari jalan perumahan.\nDekati jalan lalu coba lagi.");
       focusDest();
       return;
     }
