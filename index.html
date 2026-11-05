@@ -199,6 +199,37 @@ function buildGraph(jalanMap) {
     }
   }
 
+  // Tentukan jalan/gang mana yang SELURUHNYA merupakan cabang buntu: jalan
+  // yang bersinggungan dengan PALING BANYAK SATU jalan lain yang berbeda
+  // (gang buntu biasanya cuma nyambung ke satu jalan induk). Jalan yang
+  // bersinggungan dengan 2 jalan lain atau lebih dianggap jalan penghubung,
+  // bukan buntu - meskipun persimpangannya ada di titik yang berbeda-beda.
+  // Semua titik di jalan yang buntu ditandai, bukan cuma titik ujungnya,
+  // karena titik mana pun di gang itu tetap harus melewati satu-satunya
+  // persimpangan itu untuk mencapai jalan lain.
+  var roadNeighborRoads = {};
+  for (var k = 0; k < ids.length; k++) {
+    var id = ids[k];
+    var nodeRoad = nodes[id].road;
+    var edges = adj[id];
+    for (var ei = 0; ei < edges.length; ei++) {
+      var otherRoad = nodes[edges[ei].to].road;
+      if (otherRoad !== nodeRoad) {
+        if (!roadNeighborRoads[nodeRoad]) roadNeighborRoads[nodeRoad] = {};
+        roadNeighborRoads[nodeRoad][otherRoad] = true;
+      }
+    }
+  }
+
+  for (var road in jalanMap) {
+    var neighborCount = roadNeighborRoads[road] ? Object.keys(roadNeighborRoads[road]).length : 0;
+    var isDeadEnd = neighborCount <= 1;
+    for (var k = 0; k < (jalanMap[road] || []).length; k++) {
+      var id2 = road + '#' + k;
+      if (nodes[id2]) nodes[id2].deadEndBranch = isDeadEnd;
+    }
+  }
+
   return { nodes: nodes, adj: adj, ids: ids };
 }
 
@@ -225,7 +256,7 @@ function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
     if (restricted && graph.nodes[id].road !== roadFilter) continue;
     var p = graph.nodes[id];
     var d = distMeters(lat, lon, p.lat, p.lon);
-    if (graph.adj[id].length <= 1) {
+    if (p.deadEndBranch) {
       if (d < bestDeadD) { bestDeadD = d; bestDeadId = id; }
     } else {
       if (d < bestD) { bestD = d; bestId = id; }
