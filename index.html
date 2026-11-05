@@ -39,6 +39,7 @@ function loadData() {
 loadData();
 
 var bounds=[[-5.3442640,105.2391183],[-5.3394904,105.2434137]];
+var siteBounds = L.latLngBounds(bounds); // dipakai drawRoute() untuk cek posisi pengguna di dalam/luar area peta
 var map=L.map('map',{zoomControl:false,attributionControl:false,dragging:true,touchZoom:true,maxBounds:bounds,maxBoundsViscosity:1.0});
 L.imageOverlay('https://raw.githubusercontent.com/ryansiwi/siteplan-rajabasa/main/Site_Plan.png',bounds).addTo(map);
 map.fitBounds(bounds);
@@ -303,6 +304,14 @@ function drawRoute(a, b, c, d, w) {
       popupAnchor: [1, -34]
     });
     t = L.marker([latB, lonB], { icon: redIcon }).addTo(map).bindPopup('Rumah Tujuan').openPopup();
+
+    if (!siteBounds.contains([latA, lonA])) {
+      // Posisi pengguna di luar batas area peta - jangan bentuk garis rute,
+      // cukup tandai rumah tujuan saja.
+      map.invalidateSize();
+      map.setView([latB, lonB], 18, { animate: true });
+      return;
+    }
 
     if (!roadGraph || !roadGraph.ids || !roadGraph.ids.length) {
       // Data jalan belum selesai dimuat, coba lagi sebentar lagi.
