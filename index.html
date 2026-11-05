@@ -39,7 +39,7 @@ var MAX_SNAP_DISTANCE_M = 40;
 // ke titik jalan terdekat yang dipakai sebagai titik awal. Dari angka ini
 // Anda bisa tahu persis apakah MAX_SNAP_DISTANCE_M sudah pas, tanpa harus
 // menebak dari tampilan peta. Kembalikan ke false setelah selesai uji coba.
-var DEBUG_SNAP_DISTANCE = false;
+var DEBUG_SNAP_DISTANCE = true;
 
 function loadData() {
   fetch("https://script.google.com/macros/s/AKfycbxFmjL72O2Tal9uvtvRY4g56AM0dBvsiob-Ztklq9XjMEm4ZOG-_QdZc4Zynb6qQh0/exec?action=getData")
@@ -137,7 +137,7 @@ function buildGraph(jalanMap) {
     if (!pts || !pts.length) continue;
     for (var i = 0; i < pts.length; i++) {
       var id = road + '#' + i;
-      nodes[id] = { lat: pts[i].lat, lon: pts[i].lon, road: road };
+      nodes[id] = { lat: pts[i].lat, lon: pts[i].lon, road: road, idx: i };
       adj[id] = [];
       ids.push(id);
       if (i > 0) {
@@ -173,6 +173,9 @@ function buildGraph(jalanMap) {
   }
 
   var connected = {};
+  var roadIntersectIdx = {}; // road -> daftar indeks titik yang benar-benar
+                              // berpotongan dengan jalan lain (dipakai di
+                              // bawah untuk menentukan ekor buntu per titik)
   for (var k = 0; k < ids.length; k++) {
     var id = ids[k], p = nodes[id];
     var gx = Math.floor(p.lon / cellDegLon);
@@ -193,43 +196,36 @@ function buildGraph(jalanMap) {
             adj[id].push({ to: otherId, w: d });
             adj[otherId].push({ to: id, w: d });
             connected[pairKey] = true;
+            if (!roadIntersectIdx[p.road]) roadIntersectIdx[p.road] = [];
+            roadIntersectIdx[p.road].push(p.idx);
+            if (!roadIntersectIdx[q.road]) roadIntersectIdx[q.road] = [];
+            roadIntersectIdx[q.road].push(q.idx);
           }
         }
       }
     }
   }
 
-  // Tentukan titik mana saja yang merupakan "ekor buntu": untuk tiap jalan,
-  // cari indeks titik-titik yang punya persimpangan nyata dengan jalan lain
-  // (urutan 1..N, titik yang berdekatan sangat dekat dengan titik di jalan
-  // lain = perempatan/pertigaan). Titik-titik SEBELUM persimpangan PERTAMA
-  // dan SESUDAH persimpangan TERAKHIR ditandai buntu - karena dari situ
-  // satu-satunya cara mencapai jalan lain adalah balik lagi melewati
-  // persimpangan itu. Titik DI ANTARA dua persimpangan (atau pada
-  // persimpangan itu sendiri) dianggap bagian jalan yang terhubung, bukan
-  // buntu, meskipun jalan yang sama juga punya ekor buntu di ujung lain.
+  // Tentukan ekor buntu PER TITIK (bukan per jalan). Untuk tiap jalan,
+  // cari semua indeks titik yang benar-benar berpotongan dengan jalan lain
+  // (dari penyambungan grid di atas). Titik SEBELUM persimpangan pertama
+  // dan titik SETELAH persimpangan terakhir adalah ekor buntu; titik di
+  // ANTARA dua persimpangan (atau tepat di persimpangan) tetap jalan
+  // tembus - bukan buntu - walau jalan itu sendiri bersinggungan dengan
+  // 2+ jalan lain di titik-titik yang berbeda. Jalan yang sama sekali
+  // tidak pernah berpotongan dianggap seluruhnya buntu (terisolasi).
   for (var road in jalanMap) {
-    var pts = jalanMap[road] || [];
-    var n = pts.length;
-    var minJ = null, maxJ = null;
-
-    for (var i = 0; i < n; i++) {
-      var pid = road + '#' + i;
-      var pedges = adj[pid] || [];
-      var hasCross = false;
-      for (var ei = 0; ei < pedges.length; ei++) {
-        if (nodes[pedges[ei].to].road !== road) { hasCross = true; break; }
-      }
-      if (hasCross) {
-        if (minJ === null) minJ = i;
-        maxJ = i;
-      }
+    var pts2 = jalanMap[road] || [];
+    var idxList = roadIntersectIdx[road];
+    var minIdx = -1, maxIdx = -1;
+    if (idxList && idxList.length) {
+      minIdx = Math.min.apply(null, idxList);
+      maxIdx = Math.max.apply(null, idxList);
     }
-
-    for (var i = 0; i < n; i++) {
-      var pid2 = road + '#' + i;
-      if (!nodes[pid2]) continue;
-      nodes[pid2].deadEndBranch = (minJ === null) ? true : (i < minJ || i > maxJ);
+    for (var k = 0; k < pts2.length; k++) {
+      var id2 = road + '#' + k;
+      if (!nodes[id2]) continue;
+      nodes[id2].deadEndBranch = (minIdx === -1) || (k < minIdx) || (k > maxIdx);
     }
   }
 
@@ -242,17 +238,26 @@ function buildGraph(jalanMap) {
 // pencarian dibatasi ke jalan tersebut saja - jauh lebih akurat daripada
 // menebak lewat seluruh jalan saat beberapa jalan berjalan sejajar berdekatan.
 //
-// avoidDeadEnd: kalau true, utamakan titik yang BUKAN ujung jalan buntu
-// (node dengan hanya 1 sambungan - berarti ujung jalan tanpa persimpangan).
-// Titik buntu tetap dipakai sebagai cadangan kalau memang tidak ada titik
-// lain yang tersedia. Dipakai untuk titik AWAL (posisi pengguna) saja -
-// titik TUJUAN dibiarkan apa adanya karena rumah memang boleh di ujung gang.
+// avoidDeadEnd: kalau true, titik buntu baru DIHINDARI kalau titik BUKAN
+// buntu terdekat jaraknya tidak jauh berbeda (masih dalam AVOID_DEADEND_
+// MARGIN_M). Tapi kalau titik buntu itu ternyata JELAS jauh lebih dekat
+// daripada titik bukan-buntu manapun di seluruh peta, titik buntu itu yang
+// dipakai - tandanya pengguna memang sedang berada di gang buntu itu
+// sendiri (mis. di depan rumahnya), bukan kebetulan dekat dari posisi
+// yang sebenarnya bukan di situ. Dijkstra tetap bisa menyusuri gang itu
+// keluar lewat satu-satunya persimpangannya, jadi rute tetap benar - cuma
+// titik mulainya jadi masuk akal (dekat posisi Anda), tidak meloncat jauh
+// ke persimpangan gang yang letaknya bisa di ujung lain. Dipakai untuk
+// titik AWAL (posisi pengguna) saja - titik TUJUAN dibiarkan apa adanya
+// karena rumah memang boleh di ujung gang.
+var AVOID_DEADEND_MARGIN_M = 20;
+
 function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
   var ids = graph.ids;
   var restricted = !!roadFilter;
 
   var bestId = null, bestD = Infinity;       // titik bukan-buntu terdekat
-  var bestDeadId = null, bestDeadD = Infinity; // titik buntu terdekat (cadangan)
+  var bestDeadId = null, bestDeadD = Infinity; // titik buntu terdekat
 
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i];
@@ -270,13 +275,17 @@ function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
     return nearestNode(graph, lat, lon, null, avoidDeadEnd);
   }
 
-  if (avoidDeadEnd && bestId !== null) {
+  if (bestId === null) return { id: bestDeadId, dist: bestDeadD };
+  if (bestDeadId === null) return { id: bestId, dist: bestD };
+
+  if (avoidDeadEnd) {
+    if (bestDeadD + AVOID_DEADEND_MARGIN_M < bestD) {
+      return { id: bestDeadId, dist: bestDeadD }; // jelas lebih dekat -> pakai titik buntu ini
+    }
     return { id: bestId, dist: bestD };
   }
-  if (bestId !== null && (bestDeadId === null || bestD <= bestDeadD)) {
-    return { id: bestId, dist: bestD };
-  }
-  return { id: bestDeadId, dist: bestDeadD };
+
+  return (bestDeadD < bestD) ? { id: bestDeadId, dist: bestDeadD } : { id: bestId, dist: bestD };
 }
 
 // Dijkstra dengan binary heap sederhana - mencari rute terpendek
