@@ -21,25 +21,46 @@ var rumahData = [];
 var roadGraph = null; // dibangun sekali setelah data jalan selesai dimuat
 
 // Jarak (meter) maksimum antar titik DARI JALAN BERBEDA agar dianggap
-// sebagai persimpangan nyata dan disambungkan di graf. Perkecil jika ada
-// jalan paralel yang berdekatan tersambung secara keliru; perbesar jika
-// persimpangan asli tidak tersambung.
+// persimpangan nyata. Perkecil jika jalan paralel tersambung keliru;
+// perbesar jika persimpangan asli tidak tersambung.
 var INTERSECTION_THRESHOLD_M = 6;
 
 // Jarak (meter) maksimum dari posisi pengguna ke titik jalan terdekat agar
-// tetap dianggap "di lingkungan perumahan". Kalau jalan terdekat lebih jauh
-// dari ini, rute tidak dibentuk (perlakuannya sama seperti posisi di luar
-// batas peta) - cegah rute "nyasar" ke jalan yang sebenarnya jauh dari
-// posisi pengguna, termasuk ke ujung jalan buntu yang kebetulan paling
-// dekat secara garis lurus. Sesuaikan sesuai kebutuhan.
+// tetap dianggap "di lingkungan perumahan". Lebih jauh dari ini, rute tidak
+// dibentuk (sama seperti posisi di luar batas peta).
 var MAX_SNAP_DISTANCE_M = 40;
 
-// Set true SEMENTARA saat uji coba di lapangan: setiap kali drawRoute()
-// dipanggil, muncul alert berisi jarak sebenarnya (meter) dari posisi Anda
-// ke titik jalan terdekat yang dipakai sebagai titik awal. Dari angka ini
-// Anda bisa tahu persis apakah MAX_SNAP_DISTANCE_M sudah pas, tanpa harus
-// menebak dari tampilan peta. Kembalikan ke false setelah selesai uji coba.
+// Pemilihan titik awal berdasarkan total biaya:
+//   biaya = SNAP_WEIGHT * jarak_ke_titik_jalan + panjang_rute_ke_tujuan
+// Naikkan SNAP_WEIGHT jika rute masih meloncat ke gang yang salah; turunkan
+// jika rute menolak mulai dari gang tempat pengguna benar-benar berada.
+var SNAP_WEIGHT = 2.5;
+var SNAP_CANDIDATE_EXTRA_M = 25; // kandidat titik awal: sampai (terdekat + ini)
+var GPS_WEAK_M = 30;             // akurasi GPS lebih buruk dari ini -> peringatan
+
+// Set true SEMENTARA saat uji coba di lapangan: setiap drawRoute() muncul
+// toast berisi jarak snap sebenarnya. Kembalikan ke false setelah selesai.
 var DEBUG_SNAP_DISTANCE = true;
+
+// Notifikasi sendiri (pengganti alert, tanpa judul "Halaman pada ... menyatakan").
+function showToast(msg, ms) {
+  var el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.style.cssText =
+      'position:fixed;left:50%;bottom:90px;transform:translateX(-50%);' +
+      'max-width:78%;padding:10px 16px;border-radius:12px;z-index:9999;' +
+      'background:rgba(30,30,30,0.92);color:#fff;font:14px/1.4 sans-serif;' +
+      'text-align:center;white-space:pre-line;pointer-events:none;' +
+      'box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity .25s;opacity:0;';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = '1';
+  clearTimeout(el._t);
+  el._t = setTimeout(function () { el.style.opacity = '0'; }, ms || 3500);
+}
 
 function loadData() {
   fetch("https://script.google.com/macros/s/AKfycbxFmjL72O2Tal9uvtvRY4g56AM0dBvsiob-Ztklq9XjMEm4ZOG-_QdZc4Zynb6qQh0/exec?action=getData")
@@ -59,6 +80,7 @@ var map=L.map('map',{zoomControl:false,attributionControl:false,dragging:true,to
 L.imageOverlay('https://raw.githubusercontent.com/ryansiwi/siteplan-rajabasa/main/Site_Plan.png',bounds).addTo(map);
 map.fitBounds(bounds);
 var u=null, t=null, r=null;
+var rConn=null; // garis putus-putus: posisi pengguna -> titik jalan
 
 var NavZoomControl = L.Control.extend({
   options: { position: 'bottomright' },
@@ -81,7 +103,7 @@ var NavZoomControl = L.Control.extend({
         map.setView(t.getLatLng(), 18, { animate: true });
         t.openPopup();
       } else {
-        alert("Rumah tujuan belum dipilih!");
+        showToast("Rumah tujuan belum dipilih!");
       }
     };
 
@@ -91,7 +113,7 @@ var NavZoomControl = L.Control.extend({
         map.setView(u.getLatLng(), 18, { animate: true });
         u.openPopup();
       } else {
-        alert("Lokasi Anda belum terdeteksi!");
+        showToast("Lokasi Anda belum terdeteksi!");
       }
     };
 
@@ -123,10 +145,9 @@ function distMeters(lat1, lon1, lat2, lon2) {
   return Math.sqrt(x * x + y * y) * R;
 }
 
-// Membangun graf jalan: setiap titik berurutan di satu jalan jadi edge,
-// dan titik-titik dari jalan BERBEDA yang jaraknya sangat dekat
-// (persimpangan nyata) juga disambungkan. Pencarian persimpangan memakai
-// grid spasial sederhana supaya tidak harus membandingkan semua pasang titik.
+// Membangun graf jalan: titik berurutan di satu jalan jadi edge, dan titik
+// dari jalan BERBEDA yang sangat dekat (persimpangan nyata) juga disambungkan.
+// Pencarian persimpangan memakai grid spasial sederhana.
 function buildGraph(jalanMap) {
   var nodes = {};
   var adj = {};
@@ -173,9 +194,7 @@ function buildGraph(jalanMap) {
   }
 
   var connected = {};
-  var roadIntersectIdx = {}; // road -> daftar indeks titik yang benar-benar
-                              // berpotongan dengan jalan lain (dipakai di
-                              // bawah untuk menentukan ekor buntu per titik)
+  var roadIntersectIdx = {}; // road -> indeks titik yang berpotongan dengan jalan lain
   for (var k = 0; k < ids.length; k++) {
     var id = ids[k], p = nodes[id];
     var gx = Math.floor(p.lon / cellDegLon);
@@ -206,14 +225,10 @@ function buildGraph(jalanMap) {
     }
   }
 
-  // Tentukan ekor buntu PER TITIK (bukan per jalan). Untuk tiap jalan,
-  // cari semua indeks titik yang benar-benar berpotongan dengan jalan lain
-  // (dari penyambungan grid di atas). Titik SEBELUM persimpangan pertama
-  // dan titik SETELAH persimpangan terakhir adalah ekor buntu; titik di
-  // ANTARA dua persimpangan (atau tepat di persimpangan) tetap jalan
-  // tembus - bukan buntu - walau jalan itu sendiri bersinggungan dengan
-  // 2+ jalan lain di titik-titik yang berbeda. Jalan yang sama sekali
-  // tidak pernah berpotongan dianggap seluruhnya buntu (terisolasi).
+  // Ekor buntu PER TITIK: titik sebelum persimpangan pertama dan sesudah
+  // persimpangan terakhir sebuah jalan adalah ekor buntu; titik di antaranya
+  // (atau tepat di persimpangan) tetap jalan tembus. Jalan yang tidak pernah
+  // berpotongan dianggap seluruhnya buntu (terisolasi).
   for (var road in jalanMap) {
     var pts2 = jalanMap[road] || [];
     var idxList = roadIntersectIdx[road];
@@ -232,31 +247,16 @@ function buildGraph(jalanMap) {
   return { nodes: nodes, adj: adj, ids: ids };
 }
 
-// Cari node graf terdekat dari (lat, lon). Mengembalikan {id, dist} supaya
-// pemanggil juga tahu seberapa jauh titik terdekat itu (dipakai untuk cek
-// MAX_SNAP_DISTANCE_M). Jika roadFilter diisi dan jalan itu ada di graf,
-// pencarian dibatasi ke jalan tersebut saja - jauh lebih akurat daripada
-// menebak lewat seluruh jalan saat beberapa jalan berjalan sejajar berdekatan.
-//
-// avoidDeadEnd: kalau true, titik buntu baru DIHINDARI kalau titik BUKAN
-// buntu terdekat jaraknya tidak jauh berbeda (masih dalam AVOID_DEADEND_
-// MARGIN_M). Tapi kalau titik buntu itu ternyata JELAS jauh lebih dekat
-// daripada titik bukan-buntu manapun di seluruh peta, titik buntu itu yang
-// dipakai - tandanya pengguna memang sedang berada di gang buntu itu
-// sendiri (mis. di depan rumahnya), bukan kebetulan dekat dari posisi
-// yang sebenarnya bukan di situ. Dijkstra tetap bisa menyusuri gang itu
-// keluar lewat satu-satunya persimpangannya, jadi rute tetap benar - cuma
-// titik mulainya jadi masuk akal (dekat posisi Anda), tidak meloncat jauh
-// ke persimpangan gang yang letaknya bisa di ujung lain. Dipakai untuk
-// titik AWAL (posisi pengguna) saja - titik TUJUAN dibiarkan apa adanya
-// karena rumah memang boleh di ujung gang.
+// Cari node graf terdekat dari (lat, lon); mengembalikan {id, dist}. Jika
+// roadFilter diisi dan jalan itu ada di graf, pencarian dibatasi ke jalan
+// tersebut. Sekarang dipakai untuk titik TUJUAN; titik awal memakai pickStart().
 var AVOID_DEADEND_MARGIN_M = 20;
 
 function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
   var ids = graph.ids;
   var restricted = !!roadFilter;
 
-  var bestId = null, bestD = Infinity;       // titik bukan-buntu terdekat
+  var bestId = null, bestD = Infinity;         // titik bukan-buntu terdekat
   var bestDeadId = null, bestDeadD = Infinity; // titik buntu terdekat
 
   for (var i = 0; i < ids.length; i++) {
@@ -280,7 +280,7 @@ function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
 
   if (avoidDeadEnd) {
     if (bestDeadD + AVOID_DEADEND_MARGIN_M < bestD) {
-      return { id: bestDeadId, dist: bestDeadD }; // jelas lebih dekat -> pakai titik buntu ini
+      return { id: bestDeadId, dist: bestDeadD };
     }
     return { id: bestId, dist: bestD };
   }
@@ -288,9 +288,7 @@ function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
   return (bestDeadD < bestD) ? { id: bestDeadId, dist: bestDeadD } : { id: bestId, dist: bestD };
 }
 
-// Dijkstra dengan binary heap sederhana - mencari rute terpendek
-// menyusuri graf jalan, bisa melewati berapa pun jalan yang tersambung
-// (tidak dibatasi hanya 2 jalan seperti sebelumnya).
+// Dijkstra dengan binary heap sederhana - rute terpendek menyusuri graf jalan.
 function dijkstra(graph, startId, endId) {
   if (!startId || !endId) return null;
   if (startId === endId) return [startId];
@@ -358,23 +356,66 @@ function dijkstra(graph, startId, endId) {
   return path;
 }
 
-// drawRoute(a, b, c, d, w)
+function pathLength(graph, path) {
+  var s = 0;
+  for (var i = 1; i < path.length; i++) {
+    var p = graph.nodes[path[i - 1]], q = graph.nodes[path[i]];
+    s += distMeters(p.lat, p.lon, q.lat, q.lon);
+  }
+  return s;
+}
+
+// Pilih titik awal dari TOTAL BIAYA, bukan sekadar yang terdekat.
+// Kandidat: titik terdekat per jalan, dipisah antara bagian "tembus" dan
+// "ekor buntu". Ujung gang buntu harus keluar lewat satu persimpangan, jadi
+// biayanya membengkak dan kalah - kecuali pengguna memang jelas ada di gang itu.
+function pickStart(graph, lat, lon, endId, acc) {
+  var perKey = {};
+  for (var i = 0; i < graph.ids.length; i++) {
+    var id = graph.ids[i], p = graph.nodes[id];
+    var d = distMeters(lat, lon, p.lat, p.lon);
+    var key = p.road + (p.deadEndBranch ? ':buntu' : ':tembus');
+    if (!perKey[key] || d < perKey[key].d) perKey[key] = { id: id, d: d };
+  }
+  var cands = Object.keys(perKey)
+    .map(function (k) { return perKey[k]; })
+    .sort(function (x, y) { return x.d - y.d; });
+  if (!cands.length) return null;
+
+  var nearestD = cands[0].d;
+  var limit = nearestD + Math.max(SNAP_CANDIDATE_EXTRA_M, acc || 0);
+  var best = null;
+  for (var k = 0; k < cands.length && cands[k].d <= limit; k++) {
+    var path = dijkstra(graph, cands[k].id, endId);
+    if (!path) continue;
+    var cost = SNAP_WEIGHT * cands[k].d + pathLength(graph, path);
+    if (!best || cost < best.cost) {
+      best = { id: cands[k].id, d: cands[k].d, path: path, cost: cost };
+    }
+  }
+  if (!best) best = { id: cands[0].id, d: cands[0].d, path: null };
+  best.nearestD = nearestD;
+  return best;
+}
+
+// drawRoute(a, b, c, d, w, acc)
 //   a, b = lat, lon posisi pengguna (sebelum offset)
 //   c, d = lat, lon rumah tujuan
-//   w    = (opsional) nama jalan rumah tujuan, mis. rumah.nama_jalan dari
-//          data yang sudah diambil - dipakai supaya titik tujuan langsung
-//          dicocokkan ke jalan yang benar, bukan ditebak lewat jarak saja.
-function drawRoute(a, b, c, d, w) {
+//   w    = (opsional) nama jalan rumah tujuan, mis. rumah.nama_jalan
+//   acc  = (opsional) coords.accuracy GPS dalam meter
+function drawRoute(a, b, c, d, w, acc) {
   try {
     var latA = parseFloat(a) + offsetLat;
     var lonA = parseFloat(b) + offsetLon;
     var latB = parseFloat(c);
     var lonB = parseFloat(d);
     var destRoad = (w || "").toString().trim();
+    var accM = parseFloat(acc) || 0;
 
     if (u) map.removeLayer(u);
     if (t) map.removeLayer(t);
     if (r) map.removeLayer(r);
+    if (rConn) map.removeLayer(rConn);
 
     u = L.marker([latA, lonA]).addTo(map).bindPopup('Posisi Anda');
     var redIcon = new L.Icon({
@@ -385,66 +426,64 @@ function drawRoute(a, b, c, d, w) {
     });
     t = L.marker([latB, lonB], { icon: redIcon }).addTo(map).bindPopup('Rumah Tujuan').openPopup();
 
-    if (!siteBounds.contains([latA, lonA])) {
-      // Posisi pengguna di luar batas area peta - jangan bentuk garis rute,
-      // cukup tandai rumah tujuan saja.
+    function focusDest() {
       map.invalidateSize();
       map.setView([latB, lonB], 18, { animate: true });
+    }
+
+    if (!siteBounds.contains([latA, lonA])) {
+      showToast("Posisi Anda di luar area perumahan.\nHanya rumah tujuan yang ditandai.");
+      focusDest();
       return;
     }
 
     if (!roadGraph || !roadGraph.ids || !roadGraph.ids.length) {
       // Data jalan belum selesai dimuat, coba lagi sebentar lagi.
-      setTimeout(function () { drawRoute(a, b, c, d, w); }, 600);
+      setTimeout(function () { drawRoute(a, b, c, d, w, acc); }, 600);
       return;
     }
 
-    var startSnap = nearestNode(roadGraph, latA, lonA, null, true); // true = hindari titik buntu untuk posisi pengguna
+    var endId = nearestNode(roadGraph, latB, lonB,
+      (destRoad && globalJalanMap[destRoad]) ? destRoad : null, false).id;
+    var start = pickStart(roadGraph, latA, lonA, endId, accM);
 
-    if (DEBUG_SNAP_DISTANCE) {
-      alert(
-        'Jarak ke jalan terdekat: ' + (startSnap.id ? startSnap.dist.toFixed(1) : '-') + ' m' +
-        (startSnap.id ? ' (node: ' + startSnap.id + ')' : ' (tidak ada titik jalan ditemukan)') +
-        '\nMAX_SNAP_DISTANCE_M saat ini: ' + MAX_SNAP_DISTANCE_M + ' m' +
-        '\nRute akan ' + ((startSnap.id && startSnap.dist <= MAX_SNAP_DISTANCE_M) ? 'DIBENTUK' : 'TIDAK dibentuk')
-      );
-    }
-
-    if (!startSnap.id || startSnap.dist > MAX_SNAP_DISTANCE_M) {
-      // Jalan terdekat masih terlalu jauh dari posisi pengguna - artinya
-      // pengguna memang bukan di lingkungan perumahan (meski masih di
-      // dalam batas kotak peta). Jangan bentuk rute, cukup tandai tujuan.
-      map.invalidateSize();
-      map.setView([latB, lonB], 18, { animate: true });
+    if (!start || start.nearestD > MAX_SNAP_DISTANCE_M) {
+      showToast("Posisi Anda terlalu jauh dari jalan perumahan.\nDekati jalan lalu coba lagi.");
+      focusDest();
       return;
     }
 
-    var startId = startSnap.id;
-    var endSnap = nearestNode(roadGraph, latB, lonB, (destRoad && globalJalanMap[destRoad]) ? destRoad : null, false);
-    var endId = endSnap.id;
-
-    var path = dijkstra(roadGraph, startId, endId);
-
-    var sub;
-    if (path) {
-      sub = [[latA, lonA]];
-      for (var i = 0; i < path.length; i++) {
-        var p = roadGraph.nodes[path[i]];
-        sub.push([p.lat, p.lon]);
-      }
-      sub.push([latB, lonB]);
+    var notes = [];
+    var pts;
+    if (start.path) {
+      pts = start.path.map(function (id) {
+        var p = roadGraph.nodes[id];
+        return [p.lat, p.lon];
+      });
+      pts.push([latB, lonB]);
+      // Penghubung putus-putus dari posisi pengguna ke jalan
+      rConn = L.polyline([[latA, lonA], pts[0]],
+        { color: '#666666', weight: 3, dashArray: '6,8', opacity: 0.9 }).addTo(map);
     } else {
-      // Graf tidak tersambung antara titik awal dan tujuan - tampilkan
-      // garis lurus sebagai fallback agar aplikasi tidak gagal total.
-      sub = [[latA, lonA], [latB, lonB]];
+      // Graf tidak tersambung - garis lurus sebagai fallback.
+      pts = [[latA, lonA], [latB, lonB]];
+      notes.push("Rute lewat jalan tidak ditemukan.\nDitampilkan garis lurus.");
     }
 
-    r = L.polyline(sub, { color: '#007BFF', weight: 5, opacity: 0.8 }).addTo(map);
+    r = L.polyline(pts, { color: '#007BFF', weight: 5, opacity: 0.8 }).addTo(map);
 
-    map.invalidateSize();
-    map.setView([latB, lonB], 18, { animate: true });
+    if (accM > GPS_WEAK_M) {
+      notes.push("Sinyal GPS lemah (±" + Math.round(accM) + " m).\nRute mungkin kurang tepat.");
+    }
+    if (DEBUG_SNAP_DISTANCE) {
+      notes.push("[uji] snap " + start.d.toFixed(1) + " m, terdekat " +
+        start.nearestD.toFixed(1) + " m, node " + start.id);
+    }
+    if (notes.length) showToast(notes.join("\n"), 5000);
+
+    focusDest();
   } catch (err) {
-    alert("Error drawRoute: " + err.message);
+    showToast("Error drawRoute: " + err.message, 6000);
   }
 }
 </script>
