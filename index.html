@@ -26,6 +26,21 @@ var roadGraph = null; // dibangun sekali setelah data jalan selesai dimuat
 // persimpangan asli tidak tersambung.
 var INTERSECTION_THRESHOLD_M = 6;
 
+// Jarak (meter) maksimum dari posisi pengguna ke titik jalan terdekat agar
+// tetap dianggap "di lingkungan perumahan". Kalau jalan terdekat lebih jauh
+// dari ini, rute tidak dibentuk (perlakuannya sama seperti posisi di luar
+// batas peta) - cegah rute "nyasar" ke jalan yang sebenarnya jauh dari
+// posisi pengguna, termasuk ke ujung jalan buntu yang kebetulan paling
+// dekat secara garis lurus. Sesuaikan sesuai kebutuhan.
+var MAX_SNAP_DISTANCE_M = 40;
+
+// Set true SEMENTARA saat uji coba di lapangan: setiap kali drawRoute()
+// dipanggil, muncul alert berisi jarak sebenarnya (meter) dari posisi Anda
+// ke titik jalan terdekat yang dipakai sebagai titik awal. Dari angka ini
+// Anda bisa tahu persis apakah MAX_SNAP_DISTANCE_M sudah pas, tanpa harus
+// menebak dari tampilan peta. Kembalikan ke false setelah selesai uji coba.
+var DEBUG_SNAP_DISTANCE = false;
+
 function loadData() {
   fetch("https://script.google.com/macros/s/AKfycbxFmjL72O2Tal9uvtvRY4g56AM0dBvsiob-Ztklq9XjMEm4ZOG-_QdZc4Zynb6qQh0/exec?action=getData")
     .then(function(res) { return res.json(); })
@@ -187,25 +202,47 @@ function buildGraph(jalanMap) {
   return { nodes: nodes, adj: adj, ids: ids };
 }
 
-// Cari node graf terdekat dari (lat, lon). Jika roadFilter diisi dan
-// jalan itu ada di graf, pencarian dibatasi ke jalan tersebut saja -
-// jauh lebih akurat daripada menebak lewat seluruh jalan saat beberapa
-// jalan berjalan sejajar berdekatan.
-function nearestNode(graph, lat, lon, roadFilter) {
-  var bestId = null, bestD = Infinity;
+// Cari node graf terdekat dari (lat, lon). Mengembalikan {id, dist} supaya
+// pemanggil juga tahu seberapa jauh titik terdekat itu (dipakai untuk cek
+// MAX_SNAP_DISTANCE_M). Jika roadFilter diisi dan jalan itu ada di graf,
+// pencarian dibatasi ke jalan tersebut saja - jauh lebih akurat daripada
+// menebak lewat seluruh jalan saat beberapa jalan berjalan sejajar berdekatan.
+//
+// avoidDeadEnd: kalau true, utamakan titik yang BUKAN ujung jalan buntu
+// (node dengan hanya 1 sambungan - berarti ujung jalan tanpa persimpangan).
+// Titik buntu tetap dipakai sebagai cadangan kalau memang tidak ada titik
+// lain yang tersedia. Dipakai untuk titik AWAL (posisi pengguna) saja -
+// titik TUJUAN dibiarkan apa adanya karena rumah memang boleh di ujung gang.
+function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
   var ids = graph.ids;
   var restricted = !!roadFilter;
+
+  var bestId = null, bestD = Infinity;       // titik bukan-buntu terdekat
+  var bestDeadId = null, bestDeadD = Infinity; // titik buntu terdekat (cadangan)
+
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i];
     if (restricted && graph.nodes[id].road !== roadFilter) continue;
     var p = graph.nodes[id];
     var d = distMeters(lat, lon, p.lat, p.lon);
-    if (d < bestD) { bestD = d; bestId = id; }
+    if (graph.adj[id].length <= 1) {
+      if (d < bestDeadD) { bestDeadD = d; bestDeadId = id; }
+    } else {
+      if (d < bestD) { bestD = d; bestId = id; }
+    }
   }
-  if (bestId === null && restricted) {
-    return nearestNode(graph, lat, lon, null);
+
+  if (bestId === null && bestDeadId === null && restricted) {
+    return nearestNode(graph, lat, lon, null, avoidDeadEnd);
   }
-  return bestId;
+
+  if (avoidDeadEnd && bestId !== null) {
+    return { id: bestId, dist: bestD };
+  }
+  if (bestId !== null && (bestDeadId === null || bestD <= bestDeadD)) {
+    return { id: bestId, dist: bestD };
+  }
+  return { id: bestDeadId, dist: bestDeadD };
 }
 
 // Dijkstra dengan binary heap sederhana - mencari rute terpendek
@@ -319,8 +356,29 @@ function drawRoute(a, b, c, d, w) {
       return;
     }
 
-    var startId = nearestNode(roadGraph, latA, lonA, null);
-    var endId = nearestNode(roadGraph, latB, lonB, (destRoad && globalJalanMap[destRoad]) ? destRoad : null);
+    var startSnap = nearestNode(roadGraph, latA, lonA, null, true); // true = hindari titik buntu untuk posisi pengguna
+
+    if (DEBUG_SNAP_DISTANCE) {
+      alert(
+        'Jarak ke jalan terdekat: ' + (startSnap.id ? startSnap.dist.toFixed(1) : '-') + ' m' +
+        (startSnap.id ? ' (node: ' + startSnap.id + ')' : ' (tidak ada titik jalan ditemukan)') +
+        '\nMAX_SNAP_DISTANCE_M saat ini: ' + MAX_SNAP_DISTANCE_M + ' m' +
+        '\nRute akan ' + ((startSnap.id && startSnap.dist <= MAX_SNAP_DISTANCE_M) ? 'DIBENTUK' : 'TIDAK dibentuk')
+      );
+    }
+
+    if (!startSnap.id || startSnap.dist > MAX_SNAP_DISTANCE_M) {
+      // Jalan terdekat masih terlalu jauh dari posisi pengguna - artinya
+      // pengguna memang bukan di lingkungan perumahan (meski masih di
+      // dalam batas kotak peta). Jangan bentuk rute, cukup tandai tujuan.
+      map.invalidateSize();
+      map.setView([latB, lonB], 18, { animate: true });
+      return;
+    }
+
+    var startId = startSnap.id;
+    var endSnap = nearestNode(roadGraph, latB, lonB, (destRoad && globalJalanMap[destRoad]) ? destRoad : null, false);
+    var endId = endSnap.id;
 
     var path = dijkstra(roadGraph, startId, endId);
 
