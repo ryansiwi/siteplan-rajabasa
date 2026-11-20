@@ -3,18 +3,54 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <style>
-body{margin:0;padding:0;touch-action:pan-x pan-y;}
-#map{width:100%;height:100vh;}
-.leaflet-control-zoom{border:none!important;box-shadow:0 4px 12px rgba(0,0,0,0.25)!important;border-radius:14px!important;overflow:hidden;margin-bottom:15px!important;margin-right:15px!important;}
-.leaflet-control-zoom a{width:48px!important;height:48px!important;line-height:48px!important;font-size:24px!important;background-color:#ffffff!important;color:#333333!important;text-decoration:none;display:block;text-align:center;}
-.leaflet-control-zoom a:hover{background-color:#f2f2f2!important;}
-.leaflet-control-zoom-in{border-bottom:1px solid #eaeaea!important;}
+html,body{margin:0;padding:0;height:100%;overflow:hidden;touch-action:pan-x pan-y;}
+#stage{position:fixed;left:0;top:0;width:100%;height:100%;overflow:hidden;background:#e8e8e8;}
+/* #rotor sengaja dibuat sebesar diagonal layar supaya sudut layar tetap
+   terisi peta saat diputar. Yang diputar adalah #rotor, bukan layarnya. */
+#rotor{position:absolute;left:50%;top:50%;transform-origin:50% 50%;transition:transform .45s linear;will-change:transform;}
+#map{width:100%;height:100%;background:#e8e8e8;}
+
+/* Ikon di dalam peta diputar balik (--cr) supaya tetap tegak di layar */
+.ctr{transition:transform .45s linear;transform:rotate(var(--cr,0deg));}
+.pin{transform-origin:50% 100%;}
+.leaflet-div-icon{background:transparent!important;border:none!important;}
+
+#ctrl{position:fixed;right:15px;bottom:15px;z-index:1000;display:flex;flex-direction:column;border-radius:14px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,.25);background:#fff;}
+#ctrl a{width:48px;height:48px;line-height:48px;font-size:24px;color:#333;text-decoration:none;text-align:center;border-bottom:1px solid #eaeaea;user-select:none;-webkit-user-select:none;}
+#ctrl a:last-child{border-bottom:none;}
+#ctrl a:active{background:#f2f2f2;}
+#ctrl a.on{background:#dbeafe;}
+
+#compass{position:fixed;right:15px;top:15px;z-index:1000;width:44px;height:44px;border-radius:50%;background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.25);}
+#compassInner{width:100%;height:100%;transition:transform .45s linear;}
+#compassInner svg{width:100%;height:100%;display:block;}
+
+#toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);
+  max-width:78%;padding:10px 16px;border-radius:12px;z-index:9999;
+  background:rgba(30,30,30,0.92);color:#fff;font:14px/1.4 sans-serif;
+  text-align:center;white-space:pre-line;pointer-events:none;
+  box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity .25s;opacity:0;}
 </style>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
-<div id="map"></div>
+<div id="stage"><div id="rotor"><div id="map"></div></div></div>
+
+<div id="compass"><div id="compassInner">
+  <svg viewBox="0 0 44 44">
+    <polygon points="22,6 27,22 17,22" fill="#e53935"/>
+    <polygon points="22,38 27,22 17,22" fill="#9e9e9e"/>
+  </svg>
+</div></div>
+
+<div id="ctrl">
+  <a href="#" id="btnTarget" title="Fokus ke Rumah Tujuan">🏠</a>
+  <a href="#" id="btnUser" title="Fokus ke Lokasi Saya (mode navigasi)" class="on">📍</a>
+  <a href="#" id="btnZoomIn" title="Perbesar">+</a>
+  <a href="#" id="btnZoomOut" title="Perkecil">−</a>
+</div>
+
 <script>
 var globalJalanMap = {};
 var rumahData = [];
@@ -37,23 +73,32 @@ var MAX_SNAP_DISTANCE_M = 40;
 var SNAP_WEIGHT = 2.5;
 var SNAP_CANDIDATE_EXTRA_M = 25; // kandidat titik awal: sampai (terdekat + ini)
 var GPS_WEAK_M = 30;             // akurasi GPS lebih buruk dari ini -> peringatan
+var AVOID_DEADEND_MARGIN_M = 20;
+
+// Jalan prioritas (pengali biaya jarak; <1 = diutamakan saat Dijkstra memilih
+// antar beberapa rute yang panjangnya mirip).
+var PRIORITY_ROADS = {
+  'JL A UTAMA': 0.5,
+  'JL 8 M UTAMA': 0.5
+};
+function normRoad(name) {
+  return (name || '').toString().toUpperCase().replace(/\s+/g, ' ').trim();
+}
+function roadFactor(road) {
+  var f = PRIORITY_ROADS[normRoad(road)];
+  return f > 0 ? f : 1;
+}
 
 // Set true SEMENTARA saat uji coba di lapangan: setiap drawRoute() muncul
 // toast berisi jarak snap sebenarnya. Kembalikan ke false setelah selesai.
 var DEBUG_SNAP_DISTANCE = false;
 
-// Notifikasi sendiri (pengganti alert, tanpa judul "Halaman pada ... menyatakan").
+// Notifikasi sendiri (pengganti alert, tidak memblokir navigasi berulang).
 function showToast(msg, ms) {
   var el = document.getElementById('toast');
   if (!el) {
     el = document.createElement('div');
     el.id = 'toast';
-    el.style.cssText =
-      'position:fixed;left:50%;bottom:90px;transform:translateX(-50%);' +
-      'max-width:78%;padding:10px 16px;border-radius:12px;z-index:9999;' +
-      'background:rgba(30,30,30,0.92);color:#fff;font:14px/1.4 sans-serif;' +
-      'text-align:center;white-space:pre-line;pointer-events:none;' +
-      'box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity .25s;opacity:0;';
     document.body.appendChild(el);
   }
   el.textContent = msg;
@@ -74,69 +119,113 @@ function loadData() {
 }
 loadData();
 
+// ------------------------------------------------------------
+// UKURAN #rotor = diagonal layar (supaya sudut tidak kosong saat diputar)
+// ------------------------------------------------------------
+var rotor = document.getElementById('rotor');
+function sizeRotor() {
+  var D = Math.ceil(Math.sqrt(window.innerWidth * window.innerWidth + window.innerHeight * window.innerHeight)) + 4;
+  rotor.style.width = D + 'px';
+  rotor.style.height = D + 'px';
+  rotor.style.marginLeft = (-D / 2) + 'px';
+  rotor.style.marginTop = (-D / 2) + 'px';
+}
+sizeRotor();
+
 var bounds=[[-5.3442640,105.2391183],[-5.3394904,105.2434137]];
-var siteBounds = L.latLngBounds(bounds); // dipakai drawRoute() untuk cek posisi pengguna di dalam/luar area peta
-var map=L.map('map',{zoomControl:false,attributionControl:false,dragging:true,touchZoom:true,maxBounds:bounds,maxBoundsViscosity:1.0});
+var siteBounds = L.latLngBounds(bounds); // dipakai HANYA untuk cek "masih di area peta atau tidak", BUKAN untuk menentukan fokus kamera
+// maxBounds sengaja tidak dipakai: dengan peta berputar & selalu memusatkan
+// posisi user, batas itu membuat kamera tertahan saat user dekat tepi denah.
+var map=L.map('map',{zoomControl:false,attributionControl:false,dragging:false,touchZoom:'center',scrollWheelZoom:'center',doubleClickZoom:'center'});
 L.imageOverlay('https://raw.githubusercontent.com/ryansiwi/siteplan-rajabasa/main/Site_Plan.png',bounds).addTo(map);
 map.fitBounds(bounds);
-var u=null, t=null, r=null;
-var rConn=null; // garis putus-putus: posisi pengguna -> titik jalan
 
-var NavZoomControl = L.Control.extend({
-  options: { position: 'bottomright' },
-  onAdd: function (map) {
-    var container = L.DomUtil.create('div', 'leaflet-control-zoom leaflet-bar');
-    container.style.marginBottom = '15px';
-    container.style.marginRight = '15px';
-
-    container.innerHTML =
-      '<a href="#" title="Fokus ke Rumah Tujuan" id="btnTarget" style="border-bottom:1px solid #eaeaea;">🏠</a>' +
-      '<a href="#" title="Fokus ke Lokasi Saya" id="btnUser" style="border-bottom:1px solid #eaeaea;">📍</a>' +
-      '<a href="#" title="Perbesar" id="btnZoomIn" style="border-bottom:1px solid #eaeaea;">+</a>' +
-      '<a href="#" title="Perkecil" id="btnZoomOut">−</a>';
-
-    L.DomEvent.disableClickPropagation(container);
-
-    container.querySelector('#btnTarget').onclick = function(e) {
-      e.preventDefault();
-      if (t) {
-        map.setView(t.getLatLng(), 18, { animate: true });
-        t.openPopup();
-      } else {
-        showToast("⚠️ Rumah tujuan belum dipilih!");
-      }
-    };
-
-    container.querySelector('#btnUser').onclick = function(e) {
-      e.preventDefault();
-      if (u) {
-        map.setView(u.getLatLng(), 18, { animate: true });
-        u.openPopup();
-      } else {
-        showToast("⚠️ Lokasi Anda belum terdeteksi!");
-      }
-    };
-
-    container.querySelector('#btnZoomIn').onclick = function(e) {
-      e.preventDefault();
-      map.zoomIn();
-    };
-
-    container.querySelector('#btnZoomOut').onclick = function(e) {
-      e.preventDefault();
-      map.zoomOut();
-    };
-
-    return container;
-  }
+window.addEventListener('resize', function () {
+  sizeRotor();
+  map.invalidateSize({ pan: false });
 });
-map.addControl(new NavZoomControl());
+
+var u=null, t=null, r=null, rConn=null;
+var lastDestKey = null;
+
+// ------------------------------------------------------------
+// MODE KAMERA
+//   follow = true  : "mode navigasi" - kamera SELALU mengikuti posisi
+//                    pengguna (bukan rumah tujuan), peta berputar mengikuti
+//                    arah hadap (heading-up), geser manual dimatikan.
+//   follow = false : mode bebas (setelah tombol 🏠) - peta menghadap utara,
+//                    kamera diam, boleh digeser/zoom bebas.
+// ------------------------------------------------------------
+var follow = true;
+var NAV_ZOOM = 19;
+
+var rotAngle = null;
+var currentHeading = 0;
+var rootStyle = document.documentElement.style;
+var compassInner = document.getElementById('compassInner');
+
+function applyHeading(h) {
+  h = ((h % 360) + 360) % 360;
+  var target = -h;
+  if (rotAngle === null) {
+    rotAngle = target;
+  } else {
+    var diff = ((target - rotAngle) % 360 + 540) % 360 - 180;
+    rotAngle += diff;
+  }
+  currentHeading = h;
+  rotor.style.transform = 'rotate(' + rotAngle + 'deg)';
+  rootStyle.setProperty('--cr', (-rotAngle) + 'deg');
+  compassInner.style.transform = 'rotate(' + rotAngle + 'deg)';
+}
+applyHeading(0);
+
+function setFollow(on) {
+  follow = on;
+  document.getElementById('btnUser').className = on ? 'on' : '';
+  if (on) map.dragging.disable(); else map.dragging.enable();
+}
+setFollow(true);
+
+document.getElementById('btnTarget').onclick = function (e) {
+  e.preventDefault();
+  if (!t) { showToast("⚠️ Rumah tujuan belum dipilih!"); return; }
+  setFollow(false);
+  applyHeading(0);
+  map.setView(t.getLatLng(), 18, { animate: true });
+};
+document.getElementById('btnUser').onclick = function (e) {
+  e.preventDefault();
+  if (!u) { showToast("⚠️ Lokasi Anda belum terdeteksi!"); return; }
+  setFollow(true);
+  applyHeading(currentHeading);
+  map.setView(u.getLatLng(), NAV_ZOOM, { animate: true });
+};
+document.getElementById('btnZoomIn').onclick = function (e) { e.preventDefault(); map.zoomIn(); };
+document.getElementById('btnZoomOut').onclick = function (e) { e.preventDefault(); map.zoomOut(); };
 
 var offsetLat=-0.0001872;
 var offsetLon=-0.0004500;
 
-// Jarak dalam meter antar dua koordinat (equirectangular approximation,
-// cukup akurat untuk area sekecil kompleks perumahan).
+var userIcon = L.divIcon({
+  className: '',
+  iconSize: [40, 40],
+  iconAnchor: [20, 20],
+  html: '<div class="ctr"><svg width="40" height="40" viewBox="0 0 40 40">' +
+        '<circle cx="20" cy="20" r="16" fill="#007BFF" fill-opacity="0.18"/>' +
+        '<path d="M20 5 L30 31 L20 25 L10 31 Z" fill="#007BFF" stroke="#fff" stroke-width="2.5" stroke-linejoin="round"/>' +
+        '</svg></div>'
+});
+var destIcon = L.divIcon({
+  className: '',
+  iconSize: [30, 42],
+  iconAnchor: [15, 42],
+  html: '<div class="ctr pin"><svg width="30" height="42" viewBox="0 0 30 42">' +
+        '<path d="M15 1 C7 1 1 7 1 15 C1 26 15 41 15 41 C15 41 29 26 29 15 C29 7 23 1 15 1 Z" fill="#e53935" stroke="#fff" stroke-width="2"/>' +
+        '<circle cx="15" cy="15" r="5.5" fill="#fff"/></svg></div>'
+});
+
+// Jarak dalam meter antar dua koordinat (equirectangular approximation).
 function distMeters(lat1, lon1, lat2, lon2) {
   var R = 6371000;
   var toRad = Math.PI / 180;
@@ -145,9 +234,50 @@ function distMeters(lat1, lon1, lat2, lon2) {
   return Math.sqrt(x * x + y * y) * R;
 }
 
-// Membangun graf jalan: titik berurutan di satu jalan jadi edge, dan titik
-// dari jalan BERBEDA yang sangat dekat (persimpangan nyata) juga disambungkan.
-// Pencarian persimpangan memakai grid spasial sederhana.
+// Arah (derajat dari utara, searah jarum jam) dari titik 1 ke titik 2
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  var toRad = Math.PI / 180;
+  var f1 = lat1 * toRad, f2 = lat2 * toRad, dl = (lon2 - lon1) * toRad;
+  var y = Math.sin(dl) * Math.cos(f2);
+  var x = Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+// Arah ke titik ~lookM meter di depan sepanjang rute
+function routeBearing(sub, lookM) {
+  if (!sub || sub.length < 2) return null;
+  var acc = 0;
+  for (var i = 1; i < sub.length; i++) {
+    acc += distMeters(sub[i - 1][0], sub[i - 1][1], sub[i][0], sub[i][1]);
+    if (acc >= lookM || i === sub.length - 1) {
+      if (distMeters(sub[0][0], sub[0][1], sub[i][0], sub[i][1]) < 0.5) continue;
+      return bearingDeg(sub[0][0], sub[0][1], sub[i][0], sub[i][1]);
+    }
+  }
+  return null;
+}
+
+// Arah dari KOMPAS HP. Di Kodular, panggil dari
+// OrientationSensor1.OrientationChanged (hanya saat isNavigating):
+//   Web_Viewer1.EvaluateJS("setHeading(" & OrientationSensor1.Azimuth & ")")
+// Selama kompas aktif (< 3 detik terakhir), arah peta memakai kompas.
+var compassTime = 0;
+window.setHeading = function (deg) {
+  deg = parseFloat(deg);
+  if (isNaN(deg)) return;
+  compassTime = Date.now();
+  if (follow && Math.abs(((deg - currentHeading) + 540) % 360 - 180) >= 4) applyHeading(deg);
+};
+
+var lastGpsLat = null, lastGpsLon = null;
+var haveHeading = false;
+var MOVE_MIN_M = 3;
+
+// ------------------------------------------------------------
+// GRAF JALAN - sama dengan versi non-rotasi (dead-end per titik, dll),
+// ditambah pengali PRIORITY_ROADS pada edge SEARAH JALAN (bukan pada
+// sambungan persimpangan, karena itu bukan "menyusuri" jalan tertentu).
+// ------------------------------------------------------------
 function buildGraph(jalanMap) {
   var nodes = {};
   var adj = {};
@@ -156,6 +286,7 @@ function buildGraph(jalanMap) {
   for (var road in jalanMap) {
     var pts = jalanMap[road];
     if (!pts || !pts.length) continue;
+    var fac = roadFactor(road);
     for (var i = 0; i < pts.length; i++) {
       var id = road + '#' + i;
       nodes[id] = { lat: pts[i].lat, lon: pts[i].lon, road: road, idx: i };
@@ -163,7 +294,7 @@ function buildGraph(jalanMap) {
       ids.push(id);
       if (i > 0) {
         var prevId = road + '#' + (i - 1);
-        var w = distMeters(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+        var w = distMeters(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon) * fac;
         adj[id].push({ to: prevId, w: w });
         adj[prevId].push({ to: id, w: w });
       }
@@ -194,7 +325,7 @@ function buildGraph(jalanMap) {
   }
 
   var connected = {};
-  var roadIntersectIdx = {}; // road -> indeks titik yang berpotongan dengan jalan lain
+  var roadIntersectIdx = {};
   for (var k = 0; k < ids.length; k++) {
     var id = ids[k], p = nodes[id];
     var gx = Math.floor(p.lon / cellDegLon);
@@ -247,17 +378,15 @@ function buildGraph(jalanMap) {
   return { nodes: nodes, adj: adj, ids: ids };
 }
 
-// Cari node graf terdekat dari (lat, lon); mengembalikan {id, dist}. Jika
-// roadFilter diisi dan jalan itu ada di graf, pencarian dibatasi ke jalan
-// tersebut. Sekarang dipakai untuk titik TUJUAN; titik awal memakai pickStart().
-var AVOID_DEADEND_MARGIN_M = 20;
-
+// Cari node graf terdekat; dipakai untuk titik TUJUAN (titik awal memakai
+// pickStart() di bawah, yang mempertimbangkan biaya total, bukan sekadar
+// jarak terdekat).
 function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
   var ids = graph.ids;
   var restricted = !!roadFilter;
 
-  var bestId = null, bestD = Infinity;         // titik bukan-buntu terdekat
-  var bestDeadId = null, bestDeadD = Infinity; // titik buntu terdekat
+  var bestId = null, bestD = Infinity;
+  var bestDeadId = null, bestDeadD = Infinity;
 
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i];
@@ -288,7 +417,6 @@ function nearestNode(graph, lat, lon, roadFilter, avoidDeadEnd) {
   return (bestDeadD < bestD) ? { id: bestDeadId, dist: bestDeadD } : { id: bestId, dist: bestD };
 }
 
-// Dijkstra dengan binary heap sederhana - rute terpendek menyusuri graf jalan.
 function dijkstra(graph, startId, endId) {
   if (!startId || !endId) return null;
   if (startId === endId) return [startId];
@@ -365,10 +493,9 @@ function pathLength(graph, path) {
   return s;
 }
 
-// Pilih titik awal dari TOTAL BIAYA, bukan sekadar yang terdekat.
-// Kandidat: titik terdekat per jalan, dipisah antara bagian "tembus" dan
-// "ekor buntu". Ujung gang buntu harus keluar lewat satu persimpangan, jadi
-// biayanya membengkak dan kalah - kecuali pengguna memang jelas ada di gang itu.
+// Pilih titik awal dari TOTAL BIAYA, bukan sekadar yang terdekat. Ujung
+// gang buntu harus keluar lewat satu persimpangan, jadi biayanya membengkak
+// dan kalah - kecuali pengguna memang jelas ada di gang itu.
 function pickStart(graph, lat, lon, endId, acc) {
   var perKey = {};
   for (var i = 0; i < graph.ids.length; i++) {
@@ -401,8 +528,9 @@ function pickStart(graph, lat, lon, endId, acc) {
 // drawRoute(a, b, c, d, w, acc)
 //   a, b = lat, lon posisi pengguna (sebelum offset)
 //   c, d = lat, lon rumah tujuan
-//   w    = (opsional) nama jalan rumah tujuan, mis. rumah.nama_jalan
-//   acc  = (opsional) coords.accuracy GPS dalam meter
+//   w    = (opsional) nama jalan rumah tujuan
+//   acc  = (opsional) coords.accuracy GPS dalam meter - lihat catatan di
+//          bawah fungsi ini soal mengirim argumen ke-6 ini dari Kodular.
 function drawRoute(a, b, c, d, w, acc) {
   try {
     var latA = parseFloat(a) + offsetLat;
@@ -412,33 +540,33 @@ function drawRoute(a, b, c, d, w, acc) {
     var destRoad = (w || "").toString().trim();
     var accM = parseFloat(acc) || 0;
 
-    if (u) map.removeLayer(u);
-    if (t) map.removeLayer(t);
+    var destKey = latB + ',' + lonB;
+    var isNewDest = (destKey !== lastDestKey);
+
     if (r) map.removeLayer(r);
     if (rConn) map.removeLayer(rConn);
 
-    u = L.marker([latA, lonA]).addTo(map).bindPopup('Posisi Anda');
-    var redIcon = new L.Icon({
-      iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
-      iconSize: [25, 41],
-      iconAnchor: [12, 41],
-      popupAnchor: [1, -34]
-    });
-    t = L.marker([latB, lonB], { icon: redIcon }).addTo(map).bindPopup('Rumah Tujuan').openPopup();
+    if (u) {
+      u.setLatLng([latA, lonA]);
+    } else {
+      u = L.marker([latA, lonA], { icon: userIcon, zIndexOffset: 1000 }).addTo(map).bindPopup('Posisi Anda');
+    }
 
-    function focusDest() {
-      map.invalidateSize();
-      map.setView([latB, lonB], 18, { animate: true });
+    if (isNewDest) {
+      if (t) map.removeLayer(t);
+      t = L.marker([latB, lonB], { icon: destIcon }).addTo(map).bindPopup('Rumah Tujuan');
     }
 
     if (!siteBounds.contains([latA, lonA])) {
-      showToast("⚠️ Rute tidak terbentuk, Posisi GPS  Dan Anda berada di luar area maps perumahan!");
-      focusDest();
+      // Di luar batas peta - jangan bentuk rute, TAPI kamera tetap ikut
+      // posisi pengguna (bukan dialihkan ke rumah tujuan), supaya pengguna
+      // tahu persis di mana posisinya sekarang relatif ke denah.
+      showToast("⚠️ Posisi Anda di luar area peta perumahan.");
+      if (follow) map.setView([latA, lonA], NAV_ZOOM, { animate: true });
       return;
     }
 
     if (!roadGraph || !roadGraph.ids || !roadGraph.ids.length) {
-      // Data jalan belum selesai dimuat, coba lagi sebentar lagi.
       setTimeout(function () { drawRoute(a, b, c, d, w, acc); }, 600);
       return;
     }
@@ -449,28 +577,27 @@ function drawRoute(a, b, c, d, w, acc) {
 
     if (!start || start.nearestD > MAX_SNAP_DISTANCE_M) {
       showToast("⚠️ Posisi Anda terlalu jauh dari jalan perumahan.\nDekati jalan lalu coba lagi.");
-      focusDest();
+      if (follow) map.setView([latA, lonA], NAV_ZOOM, { animate: true });
       return;
     }
 
     var notes = [];
-    var pts;
+    var sub;
     if (start.path) {
-      pts = start.path.map(function (id) {
+      sub = start.path.map(function (id) {
         var p = roadGraph.nodes[id];
         return [p.lat, p.lon];
       });
-      pts.push([latB, lonB]);
-      // Penghubung putus-putus dari posisi pengguna ke jalan
-      rConn = L.polyline([[latA, lonA], pts[0]],
+      sub.push([latB, lonB]);
+      rConn = L.polyline([[latA, lonA], sub[0]],
         { color: '#666666', weight: 3, dashArray: '6,8', opacity: 0.9 }).addTo(map);
+      sub.unshift([latA, lonA]);
     } else {
-      // Graf tidak tersambung - garis lurus sebagai fallback.
-      pts = [[latA, lonA], [latB, lonB]];
+      sub = [[latA, lonA], [latB, lonB]];
       notes.push("Rute lewat jalan tidak ditemukan.\nDitampilkan garis lurus.");
     }
 
-    r = L.polyline(pts, { color: '#007BFF', weight: 5, opacity: 0.8 }).addTo(map);
+    r = L.polyline(sub, { color: '#007BFF', weight: 5, opacity: 0.8 }).addTo(map);
 
     if (accM > GPS_WEAK_M) {
       notes.push("Sinyal GPS lemah (±" + Math.round(accM) + " m).\nRute mungkin kurang tepat.");
@@ -481,7 +608,47 @@ function drawRoute(a, b, c, d, w, acc) {
     }
     if (notes.length) showToast(notes.join("\n"), 5000);
 
-    focusDest();
+    // ---------- ARAH HADAP ----------
+    var compassFresh = (Date.now() - compassTime) < 3000;
+    var newHeading = null;
+
+    if (!compassFresh) {
+      if (lastGpsLat !== null &&
+          distMeters(lastGpsLat, lastGpsLon, latA, lonA) >= MOVE_MIN_M) {
+        newHeading = bearingDeg(lastGpsLat, lastGpsLon, latA, lonA);
+        lastGpsLat = latA; lastGpsLon = lonA;
+        haveHeading = true;
+      } else if (lastGpsLat === null) {
+        lastGpsLat = latA; lastGpsLon = lonA;
+      }
+      if (newHeading === null && (!haveHeading || isNewDest)) {
+        var rb = routeBearing(sub, 12);
+        if (rb !== null) { newHeading = rb; haveHeading = true; }
+      }
+    }
+
+    if (follow) {
+      if (newHeading !== null &&
+          Math.abs(((newHeading - currentHeading) + 540) % 360 - 180) >= 3) {
+        applyHeading(newHeading);
+      }
+    } else if (newHeading !== null) {
+      currentHeading = newHeading;
+    }
+
+    // ---------- KAMERA ----------
+    // SELALU mengikuti posisi PENGGUNA, bukan rumah tujuan - baik saat
+    // tujuan baru dipilih maupun selama navigasi berjalan. Tombol 🏠 di
+    // #ctrl tetap tersedia kalau pengguna MEMANG ingin melihat rumah
+    // tujuan secara manual (lihat handler btnTarget di atas).
+    if (isNewDest) {
+      lastDestKey = destKey;
+      setFollow(true);
+      applyHeading(currentHeading);
+      map.setView([latA, lonA], NAV_ZOOM, { animate: false });
+    } else if (follow) {
+      map.panTo([latA, lonA], { animate: true, duration: 0.5, easeLinearity: 1 });
+    }
   } catch (err) {
     showToast("Error drawRoute: " + err.message, 6000);
   }
