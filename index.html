@@ -78,7 +78,7 @@ body.guest #gBar{display:block;}
   <div id="gTimer">⏱ Memverifikasi...</div>
   <div id="gSearch">
     <input id="gInput" type="text" placeholder="Memuat data rumah..." autocomplete="off" autocapitalize="characters" disabled />
-    <button id="gGo" disabled>Mulai</button>
+    <button id="gGo" disabled>Cari</button>
   </div>
   <div id="gList"></div>
 </div>
@@ -795,7 +795,7 @@ function drawRoute(a, b, c, d, w, acc) {
     houseKeys = Object.keys(houses).sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true }); });
     if (!expired) {
       inputEl.disabled = false; goEl.disabled = false;
-      inputEl.placeholder = 'Cari rumah, mis. BLOK A NO 306';
+      inputEl.placeholder = 'Nomor rumah (Misal: 306)';
     }
   };
   if (roadGraph) window.onDataReady();
