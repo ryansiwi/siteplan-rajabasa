@@ -1,7 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Navigasi Rajabasa Regency</title>
+<meta property="og:title" content="Akses Tamu - Navigasi Rajabasa Regency" />
+<meta property="og:description" content="Buka link ini untuk navigasi ke rumah tujuan di Rajabasa Regency. Akses bersifat sementara." />
 <style>
 html,body{margin:0;padding:0;height:100%;overflow:hidden;touch-action:pan-x pan-y;}
 #stage{position:fixed;left:0;top:0;width:100%;height:100%;overflow:hidden;background:#e8e8e8;}
@@ -30,6 +34,25 @@ html,body{margin:0;padding:0;height:100%;overflow:hidden;touch-action:pan-x pan-
   background:rgba(30,30,30,0.92);color:#fff;font:14px/1.4 sans-serif;
   text-align:center;white-space:pre-line;pointer-events:none;
   box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity .25s;opacity:0;}
+
+/* ===== MODE TAMU WEB (aktif hanya jika URL berisi ?k=KODE) ===== */
+#gBar{display:none;position:fixed;left:12px;right:72px;top:12px;z-index:1000;font:14px/1.3 sans-serif;}
+body.guest #gBar{display:block;}
+#gTimer{display:inline-block;padding:7px 12px;border-radius:12px;background:#fff;color:#0b6b2e;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.25);margin-bottom:8px;}
+#gTimer.low{color:#c62828;}
+#gSearch{display:flex;gap:6px;}
+#gInput{flex:1;min-width:0;padding:11px 12px;border:none;border-radius:12px;font-size:15px;box-shadow:0 4px 12px rgba(0,0,0,.25);text-transform:uppercase;outline:none;}
+#gGo{border:none;border-radius:12px;padding:0 14px;background:#007BFF;color:#fff;font-size:14px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.25);}
+#gGo:disabled,#gInput:disabled{opacity:.6;}
+#gList{display:none;margin-top:6px;max-height:210px;overflow:auto;background:#fff;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,.25);}
+#gList div{padding:11px 12px;border-bottom:1px solid #eee;font-size:14px;}
+#gList div:last-child{border-bottom:none;}
+#gList div:active{background:#f2f2f2;}
+#gOverlay{display:none;position:fixed;left:0;top:0;width:100%;height:100%;z-index:10000;background:rgba(20,20,20,.78);align-items:center;justify-content:center;font-family:sans-serif;}
+#gBox{background:#fff;border-radius:16px;padding:24px 22px;width:80%;max-width:340px;text-align:center;box-shadow:0 8px 28px rgba(0,0,0,.4);}
+#gBox h2{margin:0 0 8px;font-size:20px;}
+#gBox p{margin:0;color:#444;font-size:14px;line-height:1.45;}
+#gBox button{margin-top:16px;border:none;border-radius:12px;padding:11px 22px;background:#007BFF;color:#fff;font-size:14px;font-weight:700;}
 </style>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -51,7 +74,18 @@ html,body{margin:0;padding:0;height:100%;overflow:hidden;touch-action:pan-x pan-
   <a href="#" id="btnZoomOut" title="Perkecil">−</a>
 </div>
 
+<div id="gBar">
+  <div id="gTimer">⏱ Memverifikasi...</div>
+  <div id="gSearch">
+    <input id="gInput" type="text" placeholder="Memuat data rumah..." autocomplete="off" autocapitalize="characters" disabled />
+    <button id="gGo" disabled>Mulai</button>
+  </div>
+  <div id="gList"></div>
+</div>
+<div id="gOverlay"><div id="gBox"><h2 id="gTitle"></h2><p id="gMsg"></p><button id="gBtn" style="display:none"></button></div></div>
+
 <script>
+var SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxFmjL72O2Tal9uvtvRY4g56AM0dBvsiob-Ztklq9XjMEm4ZOG-_QdZc4Zynb6qQh0/exec";
 var globalJalanMap = {};
 var rumahData = [];
 var roadGraph = null; // dibangun sekali setelah data jalan selesai dimuat
@@ -108,12 +142,13 @@ function showToast(msg, ms) {
 }
 
 function loadData() {
-  fetch("https://script.google.com/macros/s/AKfycbxFmjL72O2Tal9uvtvRY4g56AM0dBvsiob-Ztklq9XjMEm4ZOG-_QdZc4Zynb6qQh0/exec?action=getData")
+  fetch(SCRIPT_URL + "?action=getData")
     .then(function(res) { return res.json(); })
     .then(function(data) {
       rumahData = data.rumah || [];
       globalJalanMap = data.jalan || {};
       roadGraph = buildGraph(globalJalanMap);
+      if (window.onDataReady) window.onDataReady();
     })
     .catch(function(err) { console.error("Gagal memuat data:", err); });
 }
@@ -653,6 +688,202 @@ function drawRoute(a, b, c, d, w, acc) {
     showToast("Error drawRoute: " + err.message, 6000);
   }
 }
+
+// ============================================================
+// MODE TAMU WEB
+//   Aktif HANYA jika URL berisi ?k=KODE (atau ?kode=KODE).
+//   Tanpa parameter itu, halaman ini berperilaku persis seperti
+//   sebelumnya (dipakai WebViewer di aplikasi Kodular).
+//
+//   Pola waktu SAMA dengan layar Home_Tamu di Kodular:
+//     1) cekKodeTamu ke Apps Script -> dapat sisa_detik dari server
+//        (jam baru mulai saat tamu pertama kali memakai kode; kolom C).
+//     2) hitung mundur lokal tiap detik dari sisa_detik itu.
+//     3) sinkron ulang ke server tiap 30 detik / saat tab aktif kembali.
+//     4) habis / kode tidak valid -> layar "Akses Berakhir", GPS dimatikan.
+// ============================================================
+(function () {
+  var qs = new URLSearchParams(location.search);
+  var GUEST = (qs.get('k') || qs.get('kode') || '').trim();
+  if (!GUEST) return;
+  document.body.classList.add('guest');
+
+  var $ = function (id) { return document.getElementById(id); };
+  var timerEl = $('gTimer'), inputEl = $('gInput'), goEl = $('gGo'), listEl = $('gList');
+  var houses = {}, houseKeys = [];
+  var dest = null, pos = null, arrived = false;
+  var watchId = null, lastPush = 0, compassOn = false;
+  var expired = false, deadline = 0, tickT = null, syncT = null;
+
+  // ---------- Overlay ----------
+  function showOverlay(title, msg, btnText, btnFn) {
+    $('gTitle').textContent = title;
+    $('gMsg').textContent = msg;
+    var b = $('gBtn');
+    if (btnText) { b.style.display = ''; b.textContent = btnText; b.onclick = btnFn; }
+    else b.style.display = 'none';
+    $('gOverlay').style.display = 'flex';
+  }
+  function hideOverlay() { $('gOverlay').style.display = 'none'; }
+  showOverlay('Memverifikasi kode akses...', 'Mohon tunggu sebentar.', null);
+
+  // ---------- Hitung mundur ----------
+  function fmt(s) {
+    var m = Math.floor(s / 60), d = s % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (d < 10 ? '0' : '') + d;
+  }
+  function render() {
+    if (expired) return;
+    var s = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    timerEl.textContent = '⏱ Sisa Waktu ' + fmt(s);
+    timerEl.className = s <= 60 ? 'low' : '';
+    if (s <= 0) expire('Masa aktif kode akses sudah habis.');
+  }
+  function expire(msg) {
+    if (expired) return;
+    expired = true;
+    clearInterval(tickT); clearInterval(syncT);
+    if (watchId !== null && navigator.geolocation) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+    timerEl.textContent = '⏱ 00:00 - Waktu habis';
+    timerEl.className = 'low';
+    inputEl.disabled = true; goEl.disabled = true; listEl.style.display = 'none';
+    showOverlay('⏰ Akses Berakhir', (msg || 'Masa aktif kode akses sudah habis.') + '\nMinta kode/link baru kepada penghuni.', null);
+  }
+
+  // ---------- Verifikasi ke Apps Script (cekKodeTamu) ----------
+  function verify(first, tries) {
+    tries = tries || 0;
+    fetch(SCRIPT_URL + '?action=cekKodeTamu&kode=' + encodeURIComponent(GUEST), { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (expired) return;
+        if (d.status === 'success') {
+          if (d.menunggu_tamu) { setTimeout(function () { verify(first); }, 3000); return; }
+          deadline = Date.now() + Number(d.sisa_detik) * 1000;
+          if (first) {
+            hideOverlay();
+            tickT = setInterval(render, 1000);
+            syncT = setInterval(function () { verify(false); }, 30000);
+          }
+          render();
+        } else if (d.sibuk) {
+          if (tries < 5) setTimeout(function () { verify(first, tries + 1); }, 1500);
+          else if (first) showOverlay('Server sibuk', 'Silakan coba lagi sebentar.', 'Coba lagi', function () { verify(true); });
+        } else {
+          expire(d.message);
+        }
+      })
+      .catch(function () {
+        if (first) showOverlay('📡 Tidak bisa terhubung', 'Periksa koneksi internet Anda.', 'Coba lagi', function () { verify(true); });
+        // sinkron ulang gagal: biarkan hitung mundur lokal jalan terus
+      });
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && deadline && !expired) verify(false);
+  });
+  verify(true);
+
+  // ---------- Data rumah ----------
+  window.onDataReady = function () {
+    houses = {};
+    (rumahData || []).forEach(function (o) {
+      var n = (o.no_rumah || '').toString().trim().toUpperCase().replace(/\s+/g, ' ');
+      var la = parseFloat(o.latitude), lo = parseFloat(o.longitude);
+      if (!n || isNaN(la) || isNaN(lo)) return;
+      houses[n] = { name: n, lat: la, lon: lo, road: (o.nama_jalan || '').toString().trim() };
+    });
+    houseKeys = Object.keys(houses).sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true }); });
+    if (!expired) {
+      inputEl.disabled = false; goEl.disabled = false;
+      inputEl.placeholder = 'Cari rumah, mis. BLOK A NO 306';
+    }
+  };
+  if (roadGraph) window.onDataReady();
+
+  // ---------- Pencarian ----------
+  function normQ(v) { return (v || '').toUpperCase().replace(/\s+/g, ' ').trim(); }
+  function renderList() {
+    var q = normQ(inputEl.value);
+    listEl.innerHTML = '';
+    if (!q) { listEl.style.display = 'none'; return; }
+    var m = houseKeys.filter(function (k) { return k.indexOf(q) !== -1; }).slice(0, 8);
+    m.forEach(function (k) {
+      var d = document.createElement('div');
+      d.textContent = k;
+      d.onclick = function () { inputEl.value = k; choose(k); };
+      listEl.appendChild(d);
+    });
+    listEl.style.display = m.length ? 'block' : 'none';
+  }
+  inputEl.addEventListener('input', renderList);
+  goEl.onclick = function () {
+    var q = normQ(inputEl.value);
+    if (houses[q]) return choose(q);
+    var m = houseKeys.filter(function (k) { return k.indexOf(q) !== -1; });
+    if (q && m.length === 1) { inputEl.value = m[0]; return choose(m[0]); }
+    showToast(q ? '⚠️ Rumah tidak ditemukan.\nPilih dari daftar yang muncul.' : '⚠️ Ketik nomor rumah dulu.');
+  };
+
+  // ---------- Navigasi ----------
+  function choose(name) {
+    if (expired || !houses[name]) return;
+    dest = houses[name];
+    arrived = false;
+    listEl.style.display = 'none';
+    inputEl.blur();
+    startCompass();
+    startGeo();
+    if (pos) push(true); else showToast('📡 Mencari lokasi Anda...');
+  }
+
+  function push(force) {
+    if (expired || !dest || !pos) return;
+    var now = Date.now();
+    if (!force && now - lastPush < 1000) return;
+    lastPush = now;
+    drawRoute(pos.lat, pos.lon, dest.lat, dest.lon, dest.road, pos.acc);
+    var d = distMeters(pos.lat + offsetLat, pos.lon + offsetLon, dest.lat, dest.lon);
+    if (d < 15 && !arrived) {
+      arrived = true;
+      showToast('🎉 Anda sudah sampai di tujuan.');
+      try { navigator.vibrate && navigator.vibrate(300); } catch (e) {}
+    }
+  }
+
+  function startGeo() {
+    if (watchId !== null) return;
+    if (!navigator.geolocation) { showToast('⚠️ Browser ini tidak mendukung GPS.'); return; }
+    watchId = navigator.geolocation.watchPosition(function (p) {
+      pos = { lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy };
+      push(false);
+    }, function (err) {
+      showToast(err.code === 1
+        ? '⚠️ Izin lokasi ditolak.\nAktifkan izin lokasi untuk situs ini, lalu muat ulang.'
+        : '⚠️ Lokasi belum tersedia.\nPastikan GPS aktif.', 5000);
+    }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+  }
+
+  // Kompas HP -> setHeading() (sama seperti OrientationChanged di Kodular)
+  function onOrient(e) {
+    var h = null;
+    if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;          // iOS
+    else if (e.absolute === true && e.alpha !== null) h = (360 - e.alpha) % 360;         // Android
+    if (h === null || isNaN(h)) return;
+    window.setHeading(h);
+  }
+  function startCompass() {
+    if (compassOn) return;
+    compassOn = true;
+    var bind = function () {
+      window.addEventListener('deviceorientationabsolute', onOrient, true);
+      window.addEventListener('deviceorientation', onOrient, true);
+    };
+    var DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === 'function') {   // iOS: wajib dari sentuhan pengguna
+      DOE.requestPermission().then(function (s) { if (s === 'granted') bind(); }).catch(function () {});
+    } else bind();
+  }
+})();
 </script>
 </body>
 </html>
